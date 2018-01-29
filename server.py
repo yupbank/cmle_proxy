@@ -54,7 +54,7 @@ def fwrap(gf, ioloop=None):
 
 class PredictHandler(tornado.web.RequestHandler):
     @gen.coroutine
-    def post(self, model):
+    def post(self, model, version=None):
         request_data = tornado.escape.json_decode(self.request.body)
         instances = request_data['instances']
         input_columns = instances[0].keys()
@@ -62,6 +62,8 @@ class PredictHandler(tornado.web.RequestHandler):
 
         request = predict_pb2.PredictRequest()
         request.model_spec.name = model
+        if version is not None:
+            request.model_spec.version = version
         
         for input_column in input_columns:
             values = [instance[input_column] for instance in instances]
@@ -93,7 +95,8 @@ def main():
 
     app = tornado.web.Application(
         [
-            (r"/(.*)/predict", PredictHandler),
+            (r"/model/(.*):predict", PredictHandler),
+            (r"/model/(.*)/version/(.*):predict", PredictHandler),
             (r"/", IndexHanlder),
             (r"/status", StatusHandler),
             ],
