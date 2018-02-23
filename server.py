@@ -75,6 +75,22 @@ def decode_b64_if_needed(value):
     else:
         return value
 
+
+def prepare_predict_requests(instances, model_name, model_version):
+    request = predict_pb2.PredictRequest()
+    request.model_spec.name = model
+
+    input_columns = instances[0].keys()
+
+    if version is not None:
+        request.model_spec.version = version
+    
+    for input_column in input_columns:
+        values = [instance[input_column] for instance in instances]
+        request.inputs[input_column].CopyFrom(tf.make_tensor_proto(values, shape=[len(values)]))
+    return request
+
+
 class PredictHandler(tornado.web.RequestHandler):
     @gen.coroutine
     def post(self, model, version=None):
@@ -88,18 +104,8 @@ class PredictHandler(tornado.web.RequestHandler):
             self.send_error('Request instances object have to use be a list')
 
         instances = decode_b64_if_needed(instances)
-
-        input_columns = instances[0].keys()
-
-        request = predict_pb2.PredictRequest()
-        request.model_spec.name = model
-
-        if version is not None:
-            request.model_spec.version = version
         
-        for input_column in input_columns:
-            values = [instance[input_column] for instance in instances]
-            request.inputs[input_column].CopyFrom(tf.make_tensor_proto(values, shape=[len(values)]))
+        request = prepare_predict_requests(instances, model, version)
 
         stub = self.settings['stub']
         result = yield fwrap(stub.Predict.future(request, self.settings['rpc_timeout']))
