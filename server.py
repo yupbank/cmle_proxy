@@ -1,24 +1,27 @@
 from __future__ import print_function
-import argparse
+
 from itertools import repeat
+import base64
+import logging
 
 from grpc.beta import implementations
-import tensorflow as tf
-
 from tensorflow_serving.apis import predict_pb2
 from tensorflow_serving.apis import prediction_service_pb2
-
-
 from tornado import gen
-import tornado.web
-from tornado.gen import Future
 from tornado.ioloop import IOLoop
 from tornado.options import define, options, parse_command_line
+import tensorflow as tf
+import tornado.web
+
 
 define("port", default=8888, help="run on the given port", type=int)
-define("server_port", default=9000, help="serving on the given port", type=int)
-define("server_address", default='localhost', help="serving on the given address", type=str)
+define("rpc_timeout", default=1.0, help="seconds for time out rpc request", type=float)
+define("rpc_port", default=9000, help="tf serving on the given port", type=int)
+define("rpc_address", default='localhost', help="tf serving on the given address", type=str)
+define("instances_key", default='instances', help="requested instances json object key")
 define("debug", default=False, help="run in debug mode")
+B64_KEY = 'b64'
+WELCOME = "Hello World"
 
 #### START code took from https://github.com/grpc/grpc/wiki/Integration-with-tornado-(python)
 
@@ -40,7 +43,7 @@ def fwrap(gf, ioloop=None):
                 result = yield fwrap(stub.function_name.future(param, timeout))
         
     '''
-    f = Future()
+    f = gen.Future()
 
     if ioloop is None:
         ioloop = IOLoop.current()
@@ -50,18 +53,42 @@ def fwrap(gf, ioloop=None):
 
 #### END code took from https://github.com/grpc/grpc/wiki/Integration-with-tornado-(python)
 
-
+def decode_b64_if_needed(value):
+    if isinstance(value, dict):
+        if B64_KEY in value:
+            return base64.b64decode(value[B64_KEY])
+        else:
+            new_value = {}
+            for k, v in value.iteritems():
+                new_value[k] = decode_b64_if_needed(v)
+            return new_value
+    elif isinstance(value, list):
+        new_value = []
+        for v in value:
+            new_value.append(decode_b64_if_needed(v))
+        return new_value
+    else:
+        return value
 
 class PredictHandler(tornado.web.RequestHandler):
     @gen.coroutine
     def post(self, model, version=None):
+        request_key = self.settings['request_key']
         request_data = tornado.escape.json_decode(self.request.body)
-        instances = request_data['instances']
+        instances = request_data.get(request_key)
+        if not instances:
+            self.send_error('Request json object have to use the key: %s'%request_key)
+
+        if len(instances) < 1 or not isinstance(instances, (list, tuple)):
+            self.send_error('Request instances object have to use be a list')
+
+        instances = decode_b64_if_needed(instances)
+
         input_columns = instances[0].keys()
-        stub = self.settings['settings']['stub']
 
         request = predict_pb2.PredictRequest()
         request.model_spec.name = model
+
         if version is not None:
             request.model_spec.version = version
         
@@ -69,47 +96,43 @@ class PredictHandler(tornado.web.RequestHandler):
             values = [instance[input_column] for instance in instances]
             request.inputs[input_column].CopyFrom(tf.make_tensor_proto(values, shape=[len(values)]))
 
-        result = yield fwrap(stub.Predict.future(request, self.settings['settings']['grpc_timeout']))
+        stub = self.settings['stub']
+        result = yield fwrap(stub.Predict.future(request, self.settings['rpc_timeout']))
         output_keys = result.outputs.keys()
         predictions = zip(*[tf.make_ndarray(result.outputs[output_key]).tolist() for output_key in output_keys])
         predictions = [dict(zip(*t)) for t in zip(repeat(output_keys), predictions)]
         self.write(dict(predictions=predictions))
 
-    get = post
 
 class IndexHanlder(tornado.web.RequestHandler):
     def get(self):
         self.write('Hello World')
 
 
-class StatusHandler(tornado.web.RequestHandler):
-    def get(self):
-        self.write('ok')
-
+def get_application(**settings):
+    return tornado.web.Application(
+            [
+            (r"/model/(.*):predict", PredictHandler),
+            (r"/model/(.*)/version/(.*):predict", PredictHandler),
+            (r"/", IndexHanlder),
+            ],
+            xsrf_cookies=False,
+            debug=options.debug,
+            rpc_timeout = options.rpc_timeout,
+            request_key = options.instances_key,
+            **settings)
 
 def main():
     parse_command_line()
 
-    channel = implementations.insecure_channel(options.server_address, options.server_port)
+    channel = implementations.insecure_channel(options.rpc_address, options.rpc_port)
     stub = prediction_service_pb2.beta_create_PredictionService_stub(channel)
-
-    app = tornado.web.Application(
-        [
-            (r"/model/(.*):predict", PredictHandler),
-            (r"/model/(.*)/version/(.*):predict", PredictHandler),
-            (r"/", IndexHanlder),
-            (r"/status", StatusHandler),
-            ],
-        cookie_secret="sadaswqds89sa9daasdasdadasd9",
-        xsrf_cookies=False,
-        debug=options.debug,
-        settings = dict(
-		stub = stub,
-        grpc_timeout = 1.0
-		)
+    extra_settings = dict(
+            stub = stub,
         )
+    app = get_application(**extra_settings)
     app.listen(options.port)
-    print('running at http://localhost:%s'%options.port)
+    logging.info('running at http://localhost:%s'%options.port)
     tornado.ioloop.IOLoop.current().start()
 
 
