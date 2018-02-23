@@ -22,6 +22,11 @@ define("instances_key", default='instances', help="requested instances json obje
 define("debug", default=False, help="run in debug mode")
 B64_KEY = 'b64'
 WELCOME = "Hello World"
+DATA_TYPE = {
+                'byte_list': tf.train.BytesList,
+                'float_list': tf.train.FloatList,
+                'int64_list': tf.train.Int64List
+             }
 
 #### START code took from https://github.com/grpc/grpc/wiki/Integration-with-tornado-(python)
 
@@ -104,6 +109,40 @@ class PredictHandler(tornado.web.RequestHandler):
         self.write(dict(predictions=predictions))
 
 
+class EstimatorHandler(tornado.web.RequestHandler):
+    @gen.coroutine
+    def post(self, model, version=None):
+        request_key = self.settings['request_key']
+        request_data = tornado.escape.json_decode(self.request.body)
+        instances = request_data.get(request_key)
+        if not instances:
+            self.send_error('Request json object have to use the key: %s'%request_key)
+
+        if len(instances) < 1 or not isinstance(instances, (list, tuple)):
+            self.send_error('Request instances object have to use be a list')
+
+        instances = decode_b64_if_needed(instances)
+
+        request = predict_pb2.PredictRequest()
+        request.model_spec.name = model
+
+        if version is not None:
+            request.model_spec.version = version
+        
+        def conver_proto_string(instance):
+            for key, value in instance.items():
+                dtype = DATA_TYPE[key]
+                yield tf.train.Feature(key=dtype([value]))
+        values = [tf.train.Example(features=tf.train.Features(feature=feture_dict)) for instance in instances]
+        request.inputs['inputs'].CopyFrom(tf.make_tensor_proto(values, shape=[len(values)]))
+
+        stub = self.settings['stub']
+        result = yield fwrap(stub.Predict.future(request, self.settings['rpc_timeout']))
+        output_keys = result.outputs.keys()
+        predictions = zip(*[tf.make_ndarray(result.outputs[output_key]).tolist() for output_key in output_keys])
+        predictions = [dict(zip(*t)) for t in zip(repeat(output_keys), predictions)]
+        self.write(dict(predictions=predictions))
+
 class IndexHanlder(tornado.web.RequestHandler):
     def get(self):
         self.write('Hello World')
@@ -113,6 +152,7 @@ def get_application(**settings):
     return tornado.web.Application(
             [
             (r"/model/(.*):predict", PredictHandler),
+            (r"/model/(.*):estimator", EstimatorHandler),
             (r"/model/(.*)/version/(.*):predict", PredictHandler),
             (r"/", IndexHanlder),
             ],
