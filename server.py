@@ -104,10 +104,10 @@ def prepare_predict_requests(instances, model_name, model_version):
 
 def prepare_classify_requests(instances, model_name, model_version):
     request = classification_pb2.ClassificationRequest()
-    request.model_spec.name = model
+    request.model_spec.name = model_name
 
-    if version is not None:
-        request.model_spec.version = version
+    if model_version is not None:
+        request.model_spec.version = model_version
 
     instance_examples = []
     for instance in instances:
@@ -160,7 +160,7 @@ class ClassifyHandler(tornado.web.RequestHandler):
 
         instances = decode_b64_if_needed(instances)
 
-        request = prepare_classify_requests(instances, model_name, model_version)        
+        request = prepare_classify_requests(instances, model, version)        
 
         stub = self.settings['stub']
         result = yield fwrap(stub.Classify.future(request, self.settings['rpc_timeout']))
