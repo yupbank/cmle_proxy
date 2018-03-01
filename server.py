@@ -87,7 +87,7 @@ def decode_b64_if_needed(value):
         return value
 
 
-def prepare_predict_requests(instances, model_name, model_version):
+def prepare_predict_requests(instances, model, version):
     request = predict_pb2.PredictRequest()
     request.model_spec.name = model
 
@@ -97,8 +97,10 @@ def prepare_predict_requests(instances, model_name, model_version):
         request.model_spec.version = version
     
     for input_column in input_columns:
-        values = [instance[input_column] for instance in instances]
-        request.inputs[input_column].CopyFrom(tf.make_tensor_proto(values, shape=[len(values)]))
+        values = np.array([instance[input_column] for instance in instances])
+        if values.dtype == np.float64:
+            values.dtype = np.float32
+        request.inputs[input_column].CopyFrom(tf.make_tensor_proto(values, shape=values.shape))
     return request
 
 
@@ -140,6 +142,7 @@ class PredictHandler(tornado.web.RequestHandler):
 
         stub = self.settings['stub']
         result = yield fwrap(stub.Predict.future(request, self.settings['rpc_timeout']))
+
         output_keys = result.outputs.keys()
         predictions = zip(*[tf.make_ndarray(result.outputs[output_key]).tolist() for output_key in output_keys])
         predictions = [dict(zip(*t)) for t in zip(repeat(output_keys), predictions)]
