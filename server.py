@@ -4,12 +4,16 @@ from itertools import repeat
 import base64
 import logging
 
+from google.protobuf.json_format import MessageToDict
 from grpc.beta import implementations
+from tensorflow_serving.apis import input_pb2
 from tensorflow_serving.apis import predict_pb2
+from tensorflow_serving.apis import classification_pb2
 from tensorflow_serving.apis import prediction_service_pb2
 from tornado import gen
 from tornado.ioloop import IOLoop
 from tornado.options import define, options, parse_command_line
+import numpy as np
 import tensorflow as tf
 import tornado.web
 
@@ -22,11 +26,18 @@ define("instances_key", default='instances', help="requested instances json obje
 define("debug", default=False, help="run in debug mode")
 B64_KEY = 'b64'
 WELCOME = "Hello World"
+
+
 DATA_TYPE = {
-                'byte_list': tf.train.BytesList,
-                'float_list': tf.train.FloatList,
-                'int64_list': tf.train.Int64List
+        np.string_: lambda r: {'byte_list': tf.train.BytesList(value=r)},
+        np.float64: lambda r: {'float_list': tf.train.FloatList(value=r)},
+        np.int64: lambda r: {'int64_list': tf.train.Int64List(value=r)}
              }
+
+
+def from_data_to_feature(data):
+    return tf.train.Feature(**DATA_TYPE[data.dtype.type](data))
+
 
 #### START code took from https://github.com/grpc/grpc/wiki/Integration-with-tornado-(python)
 
@@ -91,6 +102,26 @@ def prepare_predict_requests(instances, model_name, model_version):
     return request
 
 
+def prepare_classify_requests(instances, model_name, model_version):
+    request = classification_pb2.ClassificationRequest()
+    request.model_spec.name = model
+
+    if version is not None:
+        request.model_spec.version = version
+
+    instance_examples = []
+    for instance in instances:
+        feature_dict = {}
+        for key, value in instance.items():
+            if not isinstance(value, list):
+                value = [value]
+            feature_dict[key] = from_data_to_feature(np.array(value).ravel())
+        instance_examples.append(tf.train.Example(features=tf.train.Features(feature=feature_dict)))
+
+    request.input.CopyFrom(input_pb2.Input(example_list=input_pb2.ExampleList(examples=instance_examples)))
+    return request
+
+
 class PredictHandler(tornado.web.RequestHandler):
     @gen.coroutine
     def post(self, model, version=None):
@@ -115,7 +146,7 @@ class PredictHandler(tornado.web.RequestHandler):
         self.write(dict(predictions=predictions))
 
 
-class EstimatorHandler(tornado.web.RequestHandler):
+class ClassifyHandler(tornado.web.RequestHandler):
     @gen.coroutine
     def post(self, model, version=None):
         request_key = self.settings['request_key']
@@ -129,25 +160,12 @@ class EstimatorHandler(tornado.web.RequestHandler):
 
         instances = decode_b64_if_needed(instances)
 
-        request = predict_pb2.PredictRequest()
-        request.model_spec.name = model
-
-        if version is not None:
-            request.model_spec.version = version
-        
-        def conver_proto_string(instance):
-            for key, value in instance.items():
-                dtype = DATA_TYPE[key]
-                yield tf.train.Feature(key=dtype([value]))
-        values = [tf.train.Example(features=tf.train.Features(feature=feture_dict)) for instance in instances]
-        request.inputs['inputs'].CopyFrom(tf.make_tensor_proto(values, shape=[len(values)]))
+        request = prepare_classify_requests(instances, model_name, model_version)        
 
         stub = self.settings['stub']
-        result = yield fwrap(stub.Predict.future(request, self.settings['rpc_timeout']))
-        output_keys = result.outputs.keys()
-        predictions = zip(*[tf.make_ndarray(result.outputs[output_key]).tolist() for output_key in output_keys])
-        predictions = [dict(zip(*t)) for t in zip(repeat(output_keys), predictions)]
-        self.write(dict(predictions=predictions))
+        result = yield fwrap(stub.Classify.future(request, self.settings['rpc_timeout']))
+
+        self.write(MessageToDict(result))
 
 class IndexHanlder(tornado.web.RequestHandler):
     def get(self):
@@ -158,8 +176,9 @@ def get_application(**settings):
     return tornado.web.Application(
             [
             (r"/model/(.*):predict", PredictHandler),
-            (r"/model/(.*):estimator", EstimatorHandler),
+            (r"/model/(.*):classify", ClassifyHandler),
             (r"/model/(.*)/version/(.*):predict", PredictHandler),
+            (r"/model/(.*)/version/(.*):classify", ClassifyHandler),
             (r"/", IndexHanlder),
             ],
             xsrf_cookies=False,
