@@ -24,7 +24,7 @@ spec:
         ports:
         - containerPort: 9000
       - args:
-        - python /usr/src/app/server.py --port=8888 --server_port=9000
+        - python /usr/src/app/server.py --port=8888 --rpc_port=9000 --debug
         command:
         - /bin/sh
         - -c
@@ -33,4 +33,3 @@ spec:
         name: http-proxy
         ports:
         - containerPort: 8888
----
