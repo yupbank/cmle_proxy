@@ -29,7 +29,7 @@ WELCOME = "Hello World"
 
 
 DATA_TYPE = {
-        np.string_: lambda r: {'byte_list': tf.train.BytesList(value=r)},
+        np.string_: lambda r: {'bytes_list': tf.train.BytesList(value=r)},
         np.float64: lambda r: {'float_list': tf.train.FloatList(value=r)},
         np.int64: lambda r: {'int64_list': tf.train.Int64List(value=r)}
              }
